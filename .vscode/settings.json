@@ -1,0 +1,6 @@
+{
+    "java.project.referencedLibraries": [
+        "lib/**/*.jar",
+        "/Users/tyleranderson/Downloads/assignment/lib/zip4j-2.11.5.jar"
+    ]
+}

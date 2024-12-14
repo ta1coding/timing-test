@@ -1,0 +1,192 @@
+// Congratulations!  You hacked the password. Please now rename this file to
+// ZipPasswordCrackerParallel.java and start brute forcing the next one, this
+// time using multiple of your CPUs
+
+import net.lingala.zip4j.ZipFile;
+import net.lingala.zip4j.exception.ZipException;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public class ZipPasswordCrackerParallel {
+    // Path to the password protected ZIP file
+    private static final String ZIP_PATH = "myArchive.zip";
+    // Character set to try. Here we just use digits for simplicity.
+    private static final char[] CHARSET = "0123456789".toCharArray();
+    // Max password length to try
+    private static final int MAX_LENGTH = 5;
+
+    // Atomic flag to signal when the password is found
+    private static final AtomicBoolean foundFlag = new AtomicBoolean(false);
+    // To store the found password
+    private static volatile String foundPassword = null;
+
+    public static void main(String[] args) {
+        int availableProcessors = Runtime.getRuntime().availableProcessors();
+        int numThreads = availableProcessors;
+        
+        if (args.length > 0) {
+            try {
+                numThreads = Integer.parseInt(args[0]);
+            } catch (NumberFormatException e) {
+                System.err.println("Invalid thread count argument. Using default: " + numThreads);
+            }
+        }
+
+        if (numThreads > availableProcessors) {
+            System.err.println("Warning: Requested threads (" + numThreads + 
+                               ") exceed available processors (" + availableProcessors + "). This may not improve performance.");
+        }
+
+        boolean found = false;
+        for (int length = 1; length <= MAX_LENGTH && !foundFlag.get(); length++) {
+            found = tryAllCombinationsParallel(length, numThreads);
+        }
+
+        if (!found) {
+            System.out.println("No password found up to length " + MAX_LENGTH);
+        } else {
+            System.out.println("Password found: " + foundPassword);
+            // Extract all files now that we have the correct password
+            try {
+                ZipFile zipFile = new ZipFile(ZIP_PATH, foundPassword.toCharArray());
+                zipFile.extractAll(".");
+                System.out.println("Files extracted successfully!");
+            } catch (ZipException e) {
+                System.err.println("Extraction failed even after password match (unexpected): " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Attempts all combinations of a given length in parallel using the specified number of threads.
+     * @param length the length of passwords to try
+     * @param numThreads number of parallel threads
+     * @return true if the password is found, false otherwise
+     */
+    private static boolean tryAllCombinationsParallel(int length, int numThreads) {
+        long totalCombinations = (long) Math.pow(CHARSET.length, length);
+
+        // If combinations are fewer than threads, just use as many threads as combinations or 1
+        if (totalCombinations < numThreads) {
+            numThreads = (int) Math.max(1, totalCombinations);
+        }
+
+        // Compute chunk size for each thread
+        long chunkSize = totalCombinations / numThreads;
+        long remainder = totalCombinations % numThreads;
+
+        ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+
+        List<Future<?>> futures = new ArrayList<>();
+        long startIndex = 0;
+
+        // Distribute work among threads
+        for (int i = 0; i < numThreads; i++) {
+            long thisChunkSize = chunkSize + (i < remainder ? 1 : 0);
+            long endIndex = startIndex + thisChunkSize - 1;
+            if (thisChunkSize > 0) {
+                final long sIdx = startIndex;
+                final long eIdx = endIndex;
+
+                Callable<Void> task = () -> {
+                    tryCombinationsRange(sIdx, eIdx, length);
+                    return null;
+                };
+                futures.add(executor.submit(task));
+                startIndex = endIndex + 1;
+            }
+        }
+
+        // Wait for all threads or early termination
+        boolean foundLocally = false;
+        try {
+            for (Future<?> f : futures) {
+                f.get();
+                if (foundFlag.get()) {
+                    foundLocally = true;
+                    break;
+                }
+            }
+        } catch (InterruptedException | ExecutionException e) {
+            e.printStackTrace();
+        } finally {
+            executor.shutdownNow();
+        }
+
+        return foundLocally;
+    }
+
+    /**
+     * Try all combinations in the specified range (based on a "numbered" approach)
+     * For a given length L and CHARSET size C, we can think of each combination as
+     * a number in base C representation. For index i in [start, end], we convert i
+     * to a base-C number of length L and that gives us the combination.
+     *
+     * @param start start index (0-based)
+     * @param end end index (0-based)
+     * @param length length of the password
+     */
+    private static void tryCombinationsRange(long start, long end, int length) {
+        long total = (long) Math.pow(CHARSET.length, length);
+
+        for (long i = start; i <= end && !foundFlag.get(); i++) {
+            String candidate = indexToCombination(i, length, CHARSET);
+            if (checkPassword(candidate)) {
+                foundFlag.set(true);
+                foundPassword = candidate;
+                return;
+            }
+        }
+    }
+
+    /**
+     * Converts a numeric index to a combination of given length using the CHARSET.
+     * @param index the numeric index
+     * @param length the length of the password
+     * @param charset the charset used
+     * @return the password string
+     */
+    private static String indexToCombination(long index, int length, char[] charset) {
+        char[] result = new char[length];
+        int base = charset.length;
+
+        for (int pos = length - 1; pos >= 0; pos--) {
+            result[pos] = charset[(int) (index % base)];
+            index = index / base;
+        }
+
+        return new String(result);
+    }
+
+    /**
+     * Attempts to open the ZIP file with the given candidate password.
+     * @param candidate the password to check
+     * @return true if the password is correct, false otherwise
+     */
+    private static boolean checkPassword(String candidate) {
+        try {
+            ZipFile zipFile = new ZipFile(ZIP_PATH, candidate.toCharArray());
+            // Attempt to extract a known file to verify password
+            if (zipFile.getFileHeader("answer.txt") == null) {
+                return false;
+            }
+            // Extract to a temporary directory for password check
+            zipFile.extractFile("answer.txt", "tempCheck");
+            // Clean up after successful extraction
+            java.io.File tempFile = new java.io.File("tempCheck/answer.txt");
+            if (tempFile.exists()) {
+                tempFile.delete();
+            }
+            java.io.File tempDir = new java.io.File("tempCheck");
+            if (tempDir.exists()) {
+                tempDir.delete();
+            }
+            return true;
+        } catch (ZipException e) {
+            return false;
+        }
+    }
+}
